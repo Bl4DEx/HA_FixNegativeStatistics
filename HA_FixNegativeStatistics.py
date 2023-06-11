@@ -61,7 +61,6 @@ def fix_table_state(table: str, key: str, metadata_id: int):
     result = cur.fetchall()
 
     # Step through database in reverse order
-    # Why? We want to recalculate all sums and states without losing data. We can fix value by value if we start from the bottom
     for index, (id, value) in reversed(list(enumerate(result))):
         # Get previous entry
         _, pre_value = result[index - 1]
@@ -76,9 +75,8 @@ def fix_table_state(table: str, key: str, metadata_id: int):
 
         print(f"\nStarting with ID: {id}")
 
-        # First broken value; recalculate correct value
-        # Use same value as before if 0 or negative; use sum of both otherwise
-        new_value = pre_value if value <= 0 else pre_value + value
+        # First broken value; re-use old value (we might lose one time period of measurement)
+        new_value = pre_value
 
         # Update value in database
         updateValueInDatabase(table, id, key, new_value)
