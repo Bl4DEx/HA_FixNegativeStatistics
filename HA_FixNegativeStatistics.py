@@ -3,142 +3,319 @@
 
 """
 This script fixes the broken statistics in the HomeAssistant database caused by a bug in the Riemann Sum in HA 2023.05
-It fixes the tables: statistics, statistics_short_term
-It fixes the keys: sum, state
 
 Usage: python HA_FixNegativeStatistics [--list]
 """
 
+import json
 import os
 import sys
 import shutil
 import sqlite3
+from datetime import datetime
 
 __author__ = "Sebastian Hollas"
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
-# Path to your database
-DATABASE_PATH = r"config/home-assistant_v2.db"
-# Set the metadata_ids that you want to have fixed; run "python FixNegativeStatistics.py --list" for some help
-METADATA_IDS = (96, 97, 98, 99, 100, 101, 133, 137, 151, 152, 153, 154)
+####################################################################################
+# USER INPUT REQUIRED !
+# Path to HomeAssistant config root (e.g. /HomeAssistant/config )
+HA_CONFIG_ROOT = "/HomeAssistant/config"
+####################################################################################
+
+
+# Build Filepaths
+ENTITIES_FILE = os.path.join(HA_CONFIG_ROOT, "entities.list")
+DATABASE_PATH = os.path.join(HA_CONFIG_ROOT, "home-assistant_v2.db")
+RESTORE_STATE_PATH = os.path.join(HA_CONFIG_ROOT, ".storage", "core.restore_state")
+CONFIG_ENTRIES_PATH = os.path.join(HA_CONFIG_ROOT, ".storage", "core.config_entries")
+ENTITY_REGISTRY_PATH = os.path.join(HA_CONFIG_ROOT, ".storage", "core.entity_registry")
 
 if not os.path.isfile(DATABASE_PATH):
-    sys.exit("Database does not exist!")
+    sys.exit(f"Database {DATABASE_PATH} does not exist!")
+
+if not os.path.isfile(RESTORE_STATE_PATH):
+    sys.exit(f"File {RESTORE_STATE_PATH} does not exist! (Path to HomeAssistant config valid?)")
+
+if not os.path.isfile(CONFIG_ENTRIES_PATH):
+    sys.exit(f"File {CONFIG_ENTRIES_PATH} does not exist! (Path to HomeAssistant config valid?)")
+
+if not os.path.isfile(ENTITY_REGISTRY_PATH):
+    sys.exit(f"File {ENTITY_REGISTRY_PATH} does not exist! (Path to HomeAssistant config valid?)")
 
 # Open database
 db = sqlite3.connect(DATABASE_PATH)
 # Create cursor object within the database
 cur = db.cursor()
 
-# Amount of entries changed
-entries_changed = 0
 
-
-def fixDatabase():
-    # Create database backup
-    shutil.copyfile(DATABASE_PATH, DATABASE_PATH.replace(".db", ".db.BAK"))
-
-    # Update both tables statistics and statistics_short_term
-    for table in ("statistics", "statistics_short_term"):
-
-        # Update both keys state and sum
-        for key in ("state", "sum"):
-
-            # Fix value for all metadata_ids
-            for metadata_id in METADATA_IDS:
-                fix_table_state(table, key, metadata_id)
-
-    # Store database on disk
-    db.close()
-
-    # Print result
-    print(f"\n\n{entries_changed} values changed!")
-
-
-def fix_table_state(table: str, key: str, metadata_id: int):
-    # Execute SQL query to get all entries for this metadata_id
-    cur.execute("SELECT id,{} FROM {} WHERE metadata_id=? ORDER BY created_ts".format(key, table), (metadata_id,))
-    result = cur.fetchall()
-
-    # Step through database in reverse order
-    for index, (id, value) in reversed(list(enumerate(result))):
-        # Get previous entry
-        _, pre_value = result[index - 1]
-
-        if pre_value <= value or index == 0:
-            # We reached the first entry
-            # OR
-            # current and previous are the same or incrementing. Value is correct
-
-            # nothing to do
-            continue
-
-        print(f"\nStarting with ID: {id}")
-
-        # First broken value; re-use old value (we might lose one time period of measurement)
-        new_value = pre_value
-
-        # Update value in database
-        updateValueInDatabase(table, id, key, new_value)
-        print(f"({id}, {value}) -> ({id}, {new_value})")
-
-        # Fix ALL following entries
-        for fix_index, (fix_id, fix_value) in enumerate(result[index + 1:], index + 1):
-
-            # Get previous value (before it was fixed)
-            _, pre_value = result[fix_index - 1]
-
-            # Add difference between last value and new value
-            new_value += fix_value - pre_value
-
-            # Update value in database
-            updateValueInDatabase(table, fix_id, key, new_value)
-            print(f"({fix_id}, {fix_value}) -> ({fix_id}, {new_value})")
-
-        # Update entries for next run
-        cur.execute("SELECT id,{} FROM {} WHERE metadata_id=? ORDER BY created_ts".format(key, table), (metadata_id,))
-        result = cur.fetchall()
-
-
-def updateValueInDatabase(table: str, id: int, key: str, value: int):
-    """
-    Update key with value in table
-    :param table: Table to update in database
-    :param id   : ID of entry to update
-    :param key  : Key to update
-    :param value: New value
-    """
-
-    # Execute SQL query
-    cur.execute("UPDATE '{}' SET '{}'=? WHERE id=?".format(table, key), (value, id))
-
-    # Commit changes to DB
-    db.commit()
-
-    global entries_changed
-    entries_changed += 1
-
-
-def list_metadataIds():
-    # Execute SQL query
-    cur.execute("SELECT id,statistic_id FROM statistics_meta WHERE has_sum=1")
-
-    for id, entity in cur.fetchall():
-        # Print metadata_id and entity name
-        print(f"metadata_id: {id: >3} | {entity}")
-
-
-if __name__ == "__main__":
+def main():
 
     if len(sys.argv) == 1:
+
+        # Check that no backup file exists
+        if os.path.isfile(f"{DATABASE_PATH}.BAK"):
+            sys.exit("Database backup file already exists!")
+        # Create database backup
+        shutil.copyfile(DATABASE_PATH, f"{DATABASE_PATH}.BAK")
+
+        # Check that no backup file exists
+        if os.path.isfile(f"{RESTORE_STATE_PATH}.BAK"):
+            sys.exit("core.restore_state backup file already exists!")
+        # Create core.restore_state backup
+        shutil.copyfile(RESTORE_STATE_PATH, f"{RESTORE_STATE_PATH}.BAK")
+
+        if not os.path.isfile(ENTITIES_FILE):
+            sys.exit(f"File {ENTITIES_FILE} does not exist! (Run with --list first and remove unwanted entities)")
+
+        with open(ENTITIES_FILE, "r") as file:
+            ENTITIES = file.read().splitlines()
+
         # Fix database
-        fixDatabase()
+        fixDatabase(ENTITIES=ENTITIES)
 
     elif len(sys.argv) == 2 and sys.argv[1] == "--list":
-        # List available metadata_ids
-        list_metadataIds()
+
+        with open(ENTITIES_FILE, "w") as file:
+            # Get Entities that have a round option
+            for entity_id in getEntitiesPrecision():
+                file.write(f"{entity_id}\n")
+
+        print(f"File '{ENTITIES_FILE}' created with entities that are most likely Riemann Sum Entities"
+              f"\nPlease adjust to your needs and rerun the script with no arguments.")
 
     else:
         sys.exit("Unknown input argument!")
 
+
+def fixDatabase(ENTITIES: list):
+    # Get Precision of Entities
+    EntityPrecision = getEntitiesPrecision()
+
+    # Fix value for all metadata_ids
+    for entity_id in ENTITIES:
+
+        ################################################################################################################
+        # Get metadata_id used in table "states"
+        cur.execute("SELECT metadata_id FROM states_meta WHERE entity_id=?", (entity_id,))
+
+        if len(result := cur.fetchall()) != 1:
+            print(f"  [WARNING]: Entity with name '{entity_id}' does not exist in table states_meta! Skipping...")
+            continue
+
+        # Get metadata_id from SQL Query result
+        metadata_id_states = result[0][0]
+
+        ################################################################################################################
+        # Get metadata_id used in table "statistics"
+        cur.execute("SELECT id FROM statistics_meta WHERE statistic_id=?", (entity_id,))
+
+        if len(result := cur.fetchall()) == 0:
+            print(f"  [WARNING]: Entity with name '{entity_id}' does not exist in table states_meta! Skipping...")
+            continue
+
+        # Get metadata_id from SQL Query result
+        metadata_id_statistics = result[0][0]
+
+        ################################################################################################################
+        # Get amount of decimals for Riemann Sum integral that the user configured
+        if entity_id not in EntityPrecision:
+            print(f"  [WARNING]: Entity seems not to be a Riemann Sum Entity! Skipping...")
+            continue
+
+        # Get Precision of Entity that user configured
+        roundDigits = EntityPrecision[entity_id]
+
+        ################################################################################################################
+        # FIX DATABASE
+        print("\n========================================================================")
+        print(f"{entity_id} | {metadata_id_states = } | {metadata_id_statistics = }")
+
+        # Fix table "statistics"
+        lastValidSum = recalculateStatistics(metadata_id=metadata_id_statistics, key="sum", roundDigits=roundDigits)
+        lastValidState = recalculateStatistics(metadata_id=metadata_id_statistics, key="state", roundDigits=roundDigits)
+
+        # Delete ShortTerm statistics and input one entry with current state
+        fixShortTerm(metadata_id=metadata_id_statistics, lastValidSum=lastValidSum, lastValidState=lastValidState)
+
+        # Fix table "states"
+        recalculateStates(metadata_id=metadata_id_states, roundDigits=roundDigits)
+
+        # Fix last valid state in HA to ensure a valid calculation with the next Riemann Sum run
+        fixLastValidState(entity_id=entity_id, lastValidState=lastValidState)
+
+    # Store database on disk
+    print(f"\n{db.total_changes} changes made to database!")
+    db.commit()
+    db.close()
+
+
+def recalculateStatistics(metadata_id: int, key: str, roundDigits: int) -> str:
+
+    print(f"  Fixing table statistics for key: {key}")
+
+    # Execute SQL query to get all entries for this metadata_id
+    cur.execute("SELECT id,{} FROM statistics WHERE metadata_id=? ORDER BY created_ts".format(key), (metadata_id,))
+    result = cur.fetchall()
+
+    # Get first value from database; this is our starting point
+    try:
+        current_value = float(result[0][1])
+    except ValueError:
+        sys.exit(f"  [ERROR]: Cannot fix this entity because first entry in table 'statistics' for {key} is not a number! Sorry!")
+
+    # Loop over all entries starting with the second entry
+    for index, (idx, value) in enumerate(result[1:]):
+
+        # Get previous entry
+        _, pre_value = result[index]
+
+        if value < current_value:
+            # Current value is out-dated
+
+            if value >= pre_value:
+                # Recalculate new value with difference of previous entries
+                current_value += (value-pre_value)
+
+            roundedValue = f"{current_value:.{roundDigits}f}"
+            print(f"    Updating {idx = }: {value = } -> {roundedValue = }")
+            cur.execute("UPDATE statistics SET {}=? WHERE id=?".format(key), (roundedValue, idx))
+
+            continue
+
+        # Set current value as new value
+        current_value = value
+
+    # Return last value
+    return f"{current_value:.{roundDigits}f}"
+
+
+def fixShortTerm(metadata_id: int, lastValidSum: str, lastValidState: str):
+
+    # Delete Short Term statistics from database
+    print("  Deleting short term statistics")
+    cur.execute("DELETE FROM statistics_short_term WHERE metadata_id=?", (metadata_id, ))
+
+    now = datetime.now()
+    minute_end = now.minute - (now.minute % 5)
+    minute_start = (minute_end - 5) if minute_end else 55
+    now_end = now.replace(minute=minute_end, second=0, microsecond=0)
+    now_start = now.replace(minute=minute_start, second=0, microsecond=0)
+
+    cur.execute("INSERT INTO statistics_short_term (state, sum, metadata_id, created_ts, start_ts) VALUES(?, ?, ?, ?, ?)",
+                (lastValidState, lastValidSum, metadata_id, now_end.timestamp(), now_start.timestamp()))
+
+
+def recalculateStates(metadata_id: int, roundDigits: int):
+    print(f"  Fixing table states")
+
+    cur.execute("SELECT state_id,state,old_state_id,attributes_id FROM states WHERE metadata_id=? ORDER BY state_id",
+                (metadata_id,))
+    result = cur.fetchall()
+
+    # Get first value from database; this is our starting point
+    try:
+        current_state = float(result[0][1])
+        attributes_id = result[0][3]
+    except ValueError:
+        sys.exit("  [ERROR]: Cannot fix this entity because first entry in table 'states' is not a number! Sorry!")
+
+    # Loop over all entries starting with the second entry
+    for index, (state_id, state, old_state_id, attr_id) in enumerate(result[1:]):
+        pre_state_id, pre_state, _, _ = result[index]
+
+        if old_state_id is None:
+            # old_state_id is missing; Update to id of previous entry
+            cur.execute("UPDATE states SET old_state_id=? WHERE state_id=?", (pre_state_id, state_id))
+
+        if attributes_id != attr_id:
+            # attribute_id is wrong; update to correct one (HA sometimes creates new attributes in case of broken calculations)
+            cur.execute("UPDATE states SET attributes_id=? WHERE state_id=?", (attributes_id, state_id))
+
+        if state is None or not state.replace(".", "", 1).isdigit():
+            # State is NULL or not numeric; update to current value
+            roundedValue = f"{current_state:.{roundDigits}f}"
+            print(f"    Updating {state_id = }: {state = } -> {roundedValue}")
+            cur.execute("UPDATE states SET state=? WHERE state_id=?", (roundedValue, state_id))
+            continue
+
+        state = float(state)
+        if state < current_state:
+            # Current value is out-dated
+
+            if pre_state and pre_state.replace(".", "", 1).isdigit() and state >= float(pre_state):
+                # Recalculate new value with difference of previous entries
+                current_state += (state - float(pre_state))
+
+            roundedValue = f"{current_state:.{roundDigits}f}"
+            print(f"    Updating {state_id = }: {state = } -> {roundedValue}")
+            cur.execute("UPDATE states SET state=? WHERE state_id=?", (roundedValue, state_id))
+            continue
+
+        # Set current value as new value
+        current_state = state
+
+
+def fixLastValidState(entity_id: str, lastValidState: str):
+    # Read core.restore_state
+    with open(RESTORE_STATE_PATH, "r") as file:
+        restore_state = json.load(file)
+
+    # Loop over json
+    for state in restore_state["data"]:
+
+        # Search for entity_id
+        if state["state"]["entity_id"] == entity_id:
+            # Modify state to new value
+            state["state"]["state"] = lastValidState
+            state["extra_data"]["native_value"]["decimal_str"] = lastValidState
+            state["extra_data"]["last_valid_state"] = lastValidState
+            break
+
+    # Write modified json
+    with open(RESTORE_STATE_PATH, "w") as file:
+        json.dump(restore_state, file, indent=2, ensure_ascii=False)
+
+
+def getEntitiesPrecision() -> dict[str: int]:
+    # Initialize return dictionary
+    returnDict = dict()
+
+    # Read file core.config_entries
+    with open(CONFIG_ENTRIES_PATH, "r") as file:
+        configEntries = json.load(file)
+
+    # Read file core.entity_registry
+    with open(ENTITY_REGISTRY_PATH, "r") as file:
+        configEntities = json.load(file)
+
+    configIds = dict()
+
+    # Find entry_ids which have the option/round attribute (these are most likely Riemann Sum Entities
+    for configEntry in configEntries["data"]["entries"]:
+        number = configEntry["options"].get("round", -1)
+        if number == -1:
+            continue
+
+        # Store precision value
+        configIds[configEntry["entry_id"]] = int(number)
+
+    # Find entity_id for all entry_ids
+    for configEntity in configEntities["data"]["entities"]:
+        if configEntity["config_entry_id"] not in configIds:
+            continue
+
+        entity_id = configEntity["entity_id"]
+        config_entry_id = configEntity["config_entry_id"]
+        # Store precision and entity_id
+        returnDict[entity_id] = configIds[config_entry_id]
+
+    # Return dict with format {entity_id: precision}
+    return returnDict
+
+
+if __name__ == "__main__":
+    # Call main function
+    main()
+    # Exit with positive return value
     sys.exit(0)
