@@ -29,7 +29,7 @@ Tested with
 5. Modify entities.list to your needs (remove unwanted entities)
 6. Execute
    ```bash
-   python HA_FixNegativeStatistics.py --list
+   python HA_FixNegativeStatistics.py
    ```
 
 **NOTE:**  
