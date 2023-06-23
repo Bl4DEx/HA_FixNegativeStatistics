@@ -43,7 +43,7 @@ Otherwise, the next calculation of Riemann Sum Integral will result in an invali
 We need to fix:  
   1. In table *statistics*: Key "state"
   2. In table *statistics*: Key "sum"
-  3. In table *statistics_shor_term*: We need only entry with the last valid value of key "state" and "sum"
+  3. In table *statistics_shor_term*: We only need one entry with the last valid value of key "state" and "sum"
   4. In table "states": Key "state"
   5. In file *.storage/core.restore_state*: Last valid state of entity
 
