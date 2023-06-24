@@ -21,18 +21,23 @@ __version__ = "2.0.0"
 # USER INPUT REQUIRED !
 # Path to HomeAssistant config root (e.g. /HomeAssistant/config )
 HA_CONFIG_ROOT = "/HomeAssistant/config"
+HA_CONFIG_ROOT = r"C:/users/shollas"
 ####################################################################################
 
+# USER INPUT OPTIONAL ! (if DATABASE server is used instead of database file)
+DB_SERVER = {
+    "DB_HOST": "",
+    "DB_USER": "",
+    "DB_PASSWORD": "",
+    "DB_NAME": ""
+}
+####################################################################################
 
 # Build Filepaths
 ENTITIES_FILE = os.path.join(HA_CONFIG_ROOT, "entities.list")
-DATABASE_PATH = os.path.join(HA_CONFIG_ROOT, "home-assistant_v2.db")
 RESTORE_STATE_PATH = os.path.join(HA_CONFIG_ROOT, ".storage", "core.restore_state")
 CONFIG_ENTRIES_PATH = os.path.join(HA_CONFIG_ROOT, ".storage", "core.config_entries")
 ENTITY_REGISTRY_PATH = os.path.join(HA_CONFIG_ROOT, ".storage", "core.entity_registry")
-
-if not os.path.isfile(DATABASE_PATH):
-    sys.exit(f"Database {DATABASE_PATH} does not exist!")
 
 if not os.path.isfile(RESTORE_STATE_PATH):
     sys.exit(f"File {RESTORE_STATE_PATH} does not exist! (Path to HomeAssistant config valid?)")
@@ -43,8 +48,26 @@ if not os.path.isfile(CONFIG_ENTRIES_PATH):
 if not os.path.isfile(ENTITY_REGISTRY_PATH):
     sys.exit(f"File {ENTITY_REGISTRY_PATH} does not exist! (Path to HomeAssistant config valid?)")
 
-# Open database
-db = sqlite3.connect(DATABASE_PATH)
+
+# Open Database Server connection if user provided DB_SERVER information
+if all(DB_SERVER.values()):
+    import pymysql
+    db = pymysql.connect(
+        host=DB_SERVER["DB_HOST"],
+        user=DB_SERVER["DB_USER"],
+        password=DB_SERVER["DB_PASSWORD"],
+        database=DB_SERVER["DB_NAME"]
+    )
+
+# Create connection to database file if no DB_SERVER was provided
+else:
+    # Check for database file
+    DATABASE_PATH = os.path.join(HA_CONFIG_ROOT, "home-assistant_v2.db")
+    if not os.path.isfile(DATABASE_PATH):
+        sys.exit(f"Database {DATABASE_PATH} does not exist!")
+
+    db = sqlite3.connect(DATABASE_PATH)
+
 # Create cursor object within the database
 cur = db.cursor()
 
@@ -54,10 +77,17 @@ def main():
     if len(sys.argv) == 1:
 
         # Check that no backup file exists
-        if os.path.isfile(f"{DATABASE_PATH}.BAK"):
-            sys.exit("Database backup file already exists!")
-        # Create database backup
-        shutil.copyfile(DATABASE_PATH, f"{DATABASE_PATH}.BAK")
+        if isinstance(db, sqlite3.Connection):
+            if os.path.isfile(f"{DATABASE_PATH}.BAK"):
+                sys.exit("Database backup file already exists!")
+            # Create database backup
+            shutil.copyfile(DATABASE_PATH, f"{DATABASE_PATH}.BAK")
+        else:
+            print("Cannot create backup with a connection to a database server!\n"
+                  "Changes are made to database immediately. Make sure to have a backup available!\n\n"
+                  "Do you want to continue? (yes/no)")
+            if input().lower() != "yes":
+                sys.exit("Execution stopped by user!")
 
         # Check that no backup file exists
         if os.path.isfile(f"{RESTORE_STATE_PATH}.BAK"):
@@ -97,25 +127,25 @@ def fixDatabase(ENTITIES: list):
 
         ################################################################################################################
         # Get metadata_id used in table "states"
-        cur.execute("SELECT metadata_id FROM states_meta WHERE entity_id=?", (entity_id,))
+        SqlExec("SELECT metadata_id FROM states_meta WHERE entity_id=?", (entity_id,))
 
-        if len(result := cur.fetchall()) != 1:
+        if (result := cur.fetchone()) is None:
             print(f"  [WARNING]: Entity with name '{entity_id}' does not exist in table states_meta! Skipping...")
             continue
 
         # Get metadata_id from SQL Query result
-        metadata_id_states = result[0][0]
+        metadata_id_states = result[0]
 
         ################################################################################################################
         # Get metadata_id used in table "statistics"
-        cur.execute("SELECT id FROM statistics_meta WHERE statistic_id=?", (entity_id,))
+        SqlExec("SELECT id FROM statistics_meta WHERE statistic_id=?", (entity_id,))
 
-        if len(result := cur.fetchall()) == 0:
+        if (result := cur.fetchone()) is None:
             print(f"  [WARNING]: Entity with name '{entity_id}' does not exist in table states_meta! Skipping...")
             continue
 
         # Get metadata_id from SQL Query result
-        metadata_id_statistics = result[0][0]
+        metadata_id_statistics = result[0]
 
         ################################################################################################################
         # Get amount of decimals for Riemann Sum integral that the user configured
@@ -155,7 +185,7 @@ def recalculateStatistics(metadata_id: int, key: str, roundDigits: int) -> str:
     print(f"  Fixing table statistics for key: {key}")
 
     # Execute SQL query to get all entries for this metadata_id
-    cur.execute("SELECT id,{} FROM statistics WHERE metadata_id=? ORDER BY created_ts".format(key), (metadata_id,))
+    SqlExec(f"SELECT id,{key} FROM statistics WHERE metadata_id=? ORDER BY created_ts", (metadata_id,))
     result = cur.fetchall()
 
     # Get first value from database; this is our starting point
@@ -179,7 +209,7 @@ def recalculateStatistics(metadata_id: int, key: str, roundDigits: int) -> str:
 
             roundedValue = f"{current_value:.{roundDigits}f}"
             print(f"    Updating {idx = }: {value = } -> {roundedValue = }")
-            cur.execute("UPDATE statistics SET {}=? WHERE id=?".format(key), (roundedValue, idx))
+            SqlExec(f"UPDATE statistics SET {key}=? WHERE id=?", (roundedValue, idx))
 
             continue
 
@@ -194,7 +224,7 @@ def fixShortTerm(metadata_id: int, lastValidSum: str, lastValidState: str):
 
     # Delete Short Term statistics from database
     print("  Deleting short term statistics")
-    cur.execute("DELETE FROM statistics_short_term WHERE metadata_id=?", (metadata_id, ))
+    SqlExec("DELETE FROM statistics_short_term WHERE metadata_id=?", (metadata_id, ))
 
     now = datetime.now()
     minute_end = now.minute - (now.minute % 5)
@@ -202,14 +232,14 @@ def fixShortTerm(metadata_id: int, lastValidSum: str, lastValidState: str):
     now_end = now.replace(minute=minute_end, second=0, microsecond=0)
     now_start = now.replace(minute=minute_start, second=0, microsecond=0)
 
-    cur.execute("INSERT INTO statistics_short_term (state, sum, metadata_id, created_ts, start_ts) VALUES(?, ?, ?, ?, ?)",
-                (lastValidState, lastValidSum, metadata_id, now_end.timestamp(), now_start.timestamp()))
+    SqlExec("INSERT INTO statistics_short_term (state, sum, metadata_id, created_ts, start_ts) VALUES(?, ?, ?, ?, ?)",
+            (lastValidState, lastValidSum, metadata_id, now_end.timestamp(), now_start.timestamp()))
 
 
 def recalculateStates(metadata_id: int, roundDigits: int):
     print(f"  Fixing table states")
 
-    cur.execute("SELECT state_id,state,old_state_id,attributes_id FROM states WHERE metadata_id=? ORDER BY state_id",
+    SqlExec("SELECT state_id,state,old_state_id,attributes_id FROM states WHERE metadata_id=? ORDER BY state_id",
                 (metadata_id,))
     result = cur.fetchall()
 
@@ -226,17 +256,17 @@ def recalculateStates(metadata_id: int, roundDigits: int):
 
         if old_state_id is None:
             # old_state_id is missing; Update to id of previous entry
-            cur.execute("UPDATE states SET old_state_id=? WHERE state_id=?", (pre_state_id, state_id))
+            SqlExec("UPDATE states SET old_state_id=? WHERE state_id=?", (pre_state_id, state_id))
 
         if attributes_id != attr_id:
             # attribute_id is wrong; update to correct one (HA sometimes creates new attributes in case of broken calculations)
-            cur.execute("UPDATE states SET attributes_id=? WHERE state_id=?", (attributes_id, state_id))
+            SqlExec("UPDATE states SET attributes_id=? WHERE state_id=?", (attributes_id, state_id))
 
         if state is None or not state.replace(".", "", 1).isdigit():
             # State is NULL or not numeric; update to current value
             roundedValue = f"{current_state:.{roundDigits}f}"
             print(f"    Updating {state_id = }: {state = } -> {roundedValue}")
-            cur.execute("UPDATE states SET state=? WHERE state_id=?", (roundedValue, state_id))
+            SqlExec("UPDATE states SET state=? WHERE state_id=?", (roundedValue, state_id))
             continue
 
         state = float(state)
@@ -249,7 +279,7 @@ def recalculateStates(metadata_id: int, roundDigits: int):
 
             roundedValue = f"{current_state:.{roundDigits}f}"
             print(f"    Updating {state_id = }: {state = } -> {roundedValue}")
-            cur.execute("UPDATE states SET state=? WHERE state_id=?", (roundedValue, state_id))
+            SqlExec("UPDATE states SET state=? WHERE state_id=?", (roundedValue, state_id))
             continue
 
         # Set current value as new value
@@ -312,6 +342,13 @@ def getEntitiesPrecision() -> dict[str: int]:
 
     # Return dict with format {entity_id: precision}
     return returnDict
+
+
+def SqlExec(SqlQuery: str, arguments: tuple):
+    if not isinstance(db, sqlite3.Connection):
+        SqlQuery = SqlQuery.replace("?", "%s")
+
+    cur.execute(SqlQuery, arguments)
 
 
 if __name__ == "__main__":
