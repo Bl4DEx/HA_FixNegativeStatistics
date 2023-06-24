@@ -15,16 +15,15 @@ import sqlite3
 from datetime import datetime
 
 __author__ = "Sebastian Hollas"
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 ####################################################################################
 # USER INPUT REQUIRED !
 # Path to HomeAssistant config root (e.g. /HomeAssistant/config )
 HA_CONFIG_ROOT = "/HomeAssistant/config"
-HA_CONFIG_ROOT = r"C:/users/shollas"
 ####################################################################################
 
-# USER INPUT OPTIONAL ! (if DATABASE server is used instead of database file)
+# USER INPUT OPTIONAL ! (if MySQL server shall be used instead of a SQLite database file)
 DB_SERVER = {
     "DB_HOST": "",
     "DB_USER": "",
@@ -49,7 +48,7 @@ if not os.path.isfile(ENTITY_REGISTRY_PATH):
     sys.exit(f"File {ENTITY_REGISTRY_PATH} does not exist! (Path to HomeAssistant config valid?)")
 
 
-# Open Database Server connection if user provided DB_SERVER information
+# Open MySQL server connection if user provided DB_SERVER information
 if all(DB_SERVER.values()):
     import pymysql
     db = pymysql.connect(
@@ -59,7 +58,7 @@ if all(DB_SERVER.values()):
         database=DB_SERVER["DB_NAME"]
     )
 
-# Create connection to database file if no DB_SERVER was provided
+# Create connection to database file if no DB_SERVER information was provided
 else:
     # Check for database file
     DATABASE_PATH = os.path.join(HA_CONFIG_ROOT, "home-assistant_v2.db")
@@ -108,10 +107,11 @@ def main():
 
         with open(ENTITIES_FILE, "w") as file:
             # Get Entities that have a round option
+            SqlExec("SELECT statistic_id FROM statistics_meta WHERE has_sum=1", ())
             for entity_id in getEntitiesPrecision():
                 file.write(f"{entity_id}\n")
 
-        print(f"File '{ENTITIES_FILE}' created with entities that are most likely Riemann Sum Entities"
+        print(f"File '{ENTITIES_FILE}' created with entities that have the key 'sum'"
               f"\nPlease adjust to your needs and rerun the script with no arguments.")
 
     else:
@@ -150,11 +150,11 @@ def fixDatabase(ENTITIES: list):
         ################################################################################################################
         # Get amount of decimals for Riemann Sum integral that the user configured
         if entity_id not in EntityPrecision:
-            print(f"  [WARNING]: Entity seems not to be a Riemann Sum Entity! Skipping...")
-            continue
-
-        # Get Precision of Entity that user configured
-        roundDigits = EntityPrecision[entity_id]
+            print(f"  [WARNING]: Entity seems not to be a Riemann Sum Entity! UNTESTED. USE WITH CAUTION!")
+            roundDigits = -1
+        else:
+            # Get Precision of Entity that user configured
+            roundDigits = EntityPrecision[entity_id]
 
         ################################################################################################################
         # FIX DATABASE
@@ -171,8 +171,12 @@ def fixDatabase(ENTITIES: list):
         # Fix table "states"
         recalculateStates(metadata_id=metadata_id_states, roundDigits=roundDigits)
 
-        # Fix last valid state in HA to ensure a valid calculation with the next Riemann Sum run
-        fixLastValidState(entity_id=entity_id, lastValidState=lastValidState)
+        # Fix last valid state if entity seems to be a Riemann Sum Entity only
+        # OPEN: How to find out if entity is a Riemann Sum Entity?!
+        # Currently: If entity is in table statistics and has a "round" attribute, it is assumed to be a Riemann Sum Entity
+        if roundDigits != -1:
+            # Fix last valid state in HA to ensure a valid calculation with the next Riemann Sum calculation
+            fixLastValidState(entity_id=entity_id, lastValidState=lastValidState)
 
     # Store database on disk
     print(f"\n{db.total_changes} changes made to database!")
@@ -207,7 +211,11 @@ def recalculateStatistics(metadata_id: int, key: str, roundDigits: int) -> str:
                 # Recalculate new value with difference of previous entries
                 current_value += (value-pre_value)
 
-            roundedValue = f"{current_value:.{roundDigits}f}"
+            if roundDigits != -1:
+                roundedValue = f"{current_value:.{roundDigits}f}"
+            else:
+                # Just copy because we don't round the value
+                roundedValue = current_value
             print(f"    Updating {idx = }: {value = } -> {roundedValue = }")
             SqlExec(f"UPDATE statistics SET {key}=? WHERE id=?", (roundedValue, idx))
 
@@ -217,7 +225,12 @@ def recalculateStatistics(metadata_id: int, key: str, roundDigits: int) -> str:
         current_value = value
 
     # Return last value
-    return f"{current_value:.{roundDigits}f}"
+    if roundDigits != -1:
+        # Return rounded value
+        return f"{current_value:.{roundDigits}f}"
+    else:
+        # Return value as it is
+        return current_value
 
 
 def fixShortTerm(metadata_id: int, lastValidSum: str, lastValidState: str):
@@ -264,7 +277,11 @@ def recalculateStates(metadata_id: int, roundDigits: int):
 
         if state is None or not state.replace(".", "", 1).isdigit():
             # State is NULL or not numeric; update to current value
-            roundedValue = f"{current_state:.{roundDigits}f}"
+            if roundDigits != -1:
+                roundedValue = f"{current_state:.{roundDigits}f}"
+            else:
+                # Just copy because we don't round the value
+                roundedValue = current_state
             print(f"    Updating {state_id = }: {state = } -> {roundedValue}")
             SqlExec("UPDATE states SET state=? WHERE state_id=?", (roundedValue, state_id))
             continue
@@ -277,7 +294,11 @@ def recalculateStates(metadata_id: int, roundDigits: int):
                 # Recalculate new value with difference of previous entries
                 current_state += (state - float(pre_state))
 
-            roundedValue = f"{current_state:.{roundDigits}f}"
+            if roundDigits != -1:
+                roundedValue = f"{current_state:.{roundDigits}f}"
+            else:
+                # Just copy because we don't round the value
+                roundedValue = current_state
             print(f"    Updating {state_id = }: {state = } -> {roundedValue}")
             SqlExec("UPDATE states SET state=? WHERE state_id=?", (roundedValue, state_id))
             continue
@@ -321,7 +342,7 @@ def getEntitiesPrecision() -> dict[str: int]:
 
     configIds = dict()
 
-    # Find entry_ids which have the option/round attribute (these are most likely Riemann Sum Entities
+    # Find entry_ids which have the option/round attribute (these are most likely Riemann Sum Entities)
     for configEntry in configEntries["data"]["entries"]:
         number = configEntry["options"].get("round", -1)
         if number == -1:
@@ -346,6 +367,7 @@ def getEntitiesPrecision() -> dict[str: int]:
 
 def SqlExec(SqlQuery: str, arguments: tuple):
     if not isinstance(db, sqlite3.Connection):
+        # Replace placeholder for module PyMySQL
         SqlQuery = SqlQuery.replace("?", "%s")
 
     cur.execute(SqlQuery, arguments)

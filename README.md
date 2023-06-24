@@ -21,6 +21,16 @@ Tested with
    ```bash
    HA_CONFIG_ROOT = "/HomeAssistant/config"
    ```
+2. (Optional): Required for MySQL server connection  
+   Change following variables to your server details:
+   ```bash
+   DB_SERVER = {
+    "DB_HOST": "",
+    "DB_USER": "",
+    "DB_PASSWORD": "",
+    "DB_NAME": ""
+   }
+   ```
 3. Create a entities.list file which includes entities that can be fixed by this script by executing:  
    **(This does NOT touch your database yet)**
    ```bash
@@ -77,3 +87,7 @@ This table holds all states for every single entity in your HomeAssistant.
 ### File *core.restore_state*
 This file holds all the last valid values of your entities.  
 The Riemann Sum Integration uses this value to calculate the next state for the table *states*
+
+### New with version 2.1.0
+This script also tries to fix entities that are not Riemann Sum Entities and skips the steps which are not required  
+**This is an untested feature!**
