@@ -1,5 +1,10 @@
 # CHANGELOG.md
 
+## 2.1.1
+* Fixed a bug where --list did not list all entities with has_sum=1
+* Added *autocommit=True* for MySQL server connection
+* No longer round values but handle all values as they are stored in the database
+
 ## 2.1.0
 * Add support for a MySQL server using the package PyMySQL
 * Add support for entities that are no Riemann Sum Entities
