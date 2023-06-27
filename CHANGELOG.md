@@ -1,5 +1,11 @@
 # CHANGELOG.md
 
+## 2.1.2
+* Table statistics: Update sum/state if value is NULL
+* FixLastValidState: Add checks for types
+* Remove autocommit for MySQL server
+* Remove output of total changes but improve script output overall
+
 ## 2.1.1
 * Fixed a bug where --list did not list all entities with has_sum=1
 * Added *autocommit=True* for MySQL server connection

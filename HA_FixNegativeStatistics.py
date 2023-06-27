@@ -16,14 +16,14 @@ from decimal import Decimal, InvalidOperation
 from datetime import datetime
 
 __author__ = "Sebastian Hollas"
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 
 ####################################################################################
 # USER INPUT REQUIRED !
 # Path to HomeAssistant config root (e.g. /HomeAssistant/config )
 HA_CONFIG_ROOT = "/HomeAssistant/config"
-####################################################################################
 
+####################################################################################
 # USER INPUT OPTIONAL ! (if MySQL server shall be used instead of a SQLite database file)
 DB_SERVER = {
     "DB_HOST": "",
@@ -47,8 +47,7 @@ if all(DB_SERVER.values()):
         host=DB_SERVER["DB_HOST"],
         user=DB_SERVER["DB_USER"],
         password=DB_SERVER["DB_PASSWORD"],
-        database=DB_SERVER["DB_NAME"],
-        autocommit=True
+        database=DB_SERVER["DB_NAME"]
     )
 
 # Create connection to database file if no DB_SERVER information was provided
@@ -118,13 +117,14 @@ def fixDatabase(ENTITIES: list):
 
     # Fix value for all metadata_ids
     for entity_id in ENTITIES:
+        print("\n=====================================================================================================")
 
         ################################################################################################################
         # Get metadata_id used in table "states"
         SqlExec("SELECT metadata_id FROM states_meta WHERE entity_id=?", (entity_id,))
 
         if (result := cur.fetchone()) is None:
-            print(f"  [WARNING]: Entity with name '{entity_id}' does not exist in table states_meta! Skipping...")
+            print(f"Entity with name '{entity_id}' does not exist in table states_meta! Skipping...")
             continue
 
         # Get metadata_id from SQL Query result
@@ -135,7 +135,7 @@ def fixDatabase(ENTITIES: list):
         SqlExec("SELECT id FROM statistics_meta WHERE statistic_id=?", (entity_id,))
 
         if (result := cur.fetchone()) is None:
-            print(f"  [WARNING]: Entity with name '{entity_id}' does not exist in table states_meta! Skipping...")
+            print(f"Entity with name '{entity_id}' does not exist in table states_meta! Skipping...")
             continue
 
         # Get metadata_id from SQL Query result
@@ -143,7 +143,6 @@ def fixDatabase(ENTITIES: list):
 
         ################################################################################################################
         # FIX DATABASE
-        print("\n========================================================================")
         print(f"{entity_id} | {metadata_id_states = } | {metadata_id_statistics = }")
 
         # Fix table "statistics"
@@ -160,14 +159,13 @@ def fixDatabase(ENTITIES: list):
         fixLastValidState(entity_id=entity_id, lastValidState=lastValidState)
 
     # Store database on disk
-    print(f"\n{db.total_changes} changes made to database!")
     db.commit()
     db.close()
 
 
 def recalculateStatistics(metadata_id: int, key: str) -> str:
-
     print(f"  Fixing table statistics for key: {key}")
+    modificationDone = False
 
     # Execute SQL query to get all entries for this metadata_id
     SqlExec(f"SELECT id,{key} FROM statistics WHERE metadata_id=? ORDER BY created_ts", (metadata_id,))
@@ -177,7 +175,8 @@ def recalculateStatistics(metadata_id: int, key: str) -> str:
     try:
         current_value = Decimal(str(result[0][1]))
     except ValueError:
-        sys.exit(f"  [ERROR]: Cannot fix this entity because first entry in table 'statistics' for {key} is not a number! Sorry!")
+        sys.exit(f"  [ERROR]: Cannot fix this entity because first entry in table 'statistics' for {key} is not a number! Sorry!\n"
+                 f"No changes were committed into the database!")
 
     # Loop over all entries starting with the second entry
     for index, (idx, value) in enumerate(result[1:]):
@@ -189,27 +188,36 @@ def recalculateStatistics(metadata_id: int, key: str) -> str:
         value = Decimal(str(value))
         pre_value = Decimal(str(pre_value))
 
+        if value is None:
+            print(f"    Updating {idx = }: {value} -> {current_value}")
+            SqlExec(f"UPDATE statistics SET {key}=? WHERE id=?", (float(current_value), idx))
+            modificationDone = True
+            continue
+
         if value < current_value:
             # Current value is out-dated
 
-            if value >= pre_value:
+            if pre_value and value >= pre_value:
                 # Recalculate new value with difference of previous entries
                 current_value += (value-pre_value)
 
             print(f"    Updating {idx = }: {value} -> {current_value}")
             SqlExec(f"UPDATE statistics SET {key}=? WHERE id=?", (float(current_value), idx))
+            modificationDone = True
 
             continue
 
         # Set current value as new value
         current_value = value
 
+    if not modificationDone:
+        print("    Nothing was modified!")
+
     # Return last value
     return str(current_value)
 
 
 def fixShortTerm(metadata_id: int, lastValidSum: str, lastValidState: str):
-
     # Delete Short Term statistics from database
     print("  Deleting short term statistics")
     SqlExec("DELETE FROM statistics_short_term WHERE metadata_id=?", (metadata_id, ))
@@ -223,9 +231,12 @@ def fixShortTerm(metadata_id: int, lastValidSum: str, lastValidState: str):
     SqlExec("INSERT INTO statistics_short_term (state, sum, metadata_id, created_ts, start_ts) VALUES(?, ?, ?, ?, ?)",
             (lastValidState, lastValidSum, metadata_id, now_end.timestamp(), now_start.timestamp()))
 
+    print("    All entries deleted and replaced by a single entry with last valid value")
+
 
 def recalculateStates(metadata_id: int):
     print(f"  Fixing table states")
+    modificationDone = False
 
     SqlExec("SELECT state_id,state,old_state_id,attributes_id FROM states WHERE metadata_id=? ORDER BY state_id",
                 (metadata_id,))
@@ -236,7 +247,8 @@ def recalculateStates(metadata_id: int):
         current_state = Decimal(str(result[0][1]))
         attributes_id = result[0][3]
     except InvalidOperation:
-        sys.exit(f"  [ERROR]: Cannot fix this entity because first entry in table 'states' is not a number! first entry: {result[0][3]}")
+        sys.exit(f"  [ERROR]: Cannot fix this entity because first entry in table 'states' is not a number! first entry: {result[0][3]}\n"
+                 f"No changes were committed into the database!")
 
     # Loop over all entries starting with the second entry
     for index, (state_id, state, old_state_id, attr_id) in enumerate(result[1:]):
@@ -244,16 +256,21 @@ def recalculateStates(metadata_id: int):
 
         if old_state_id is None:
             # old_state_id is missing; Update to id of previous entry
+            print(f"    Updating old_state_id {state_id = }: {old_state_id} -> {pre_state_id}")
             SqlExec("UPDATE states SET old_state_id=? WHERE state_id=?", (pre_state_id, state_id))
+            modificationDone = True
 
         if attributes_id != attr_id:
             # attribute_id is wrong; update to correct one (HA sometimes creates new attributes in case of broken calculations)
+            print(f"    Updating attributes_id {state_id = }: {attr_id} -> {attributes_id}")
             SqlExec("UPDATE states SET attributes_id=? WHERE state_id=?", (attributes_id, state_id))
+            modificationDone = True
 
         if state is None or not state.replace(".", "", 1).isdigit():
             # State is NULL or not numeric; update to current value
-            print(f"    Updating {state_id = }: {state} -> {current_state}")
+            print(f"    Updating state {state_id = }: {state} -> {current_state}")
             SqlExec("UPDATE states SET state=? WHERE state_id=?", (float(current_state), state_id))
+            modificationDone = True
             continue
 
         state = Decimal(str(state))
@@ -264,15 +281,22 @@ def recalculateStates(metadata_id: int):
                 # Recalculate new value with difference of previous entries
                 current_state += (state - Decimal(str(pre_state)))
 
-            print(f"    Updating {state_id = }: {state} -> {current_state}")
+            print(f"    Updating state {state_id = }: {state} -> {current_state}")
             SqlExec("UPDATE states SET state=? WHERE state_id=?", (float(current_state), state_id))
+            modificationDone = True
             continue
 
         # Set current value as new value
         current_state = state
 
+    if not modificationDone:
+        print("    Nothing was modified!")
+
 
 def fixLastValidState(entity_id: str, lastValidState: str):
+    print("  Fixing last valid state in core.restore_state")
+    modificationDone = False
+
     # Read core.restore_state
     with open(RESTORE_STATE_PATH, "r") as file:
         restore_state = json.load(file)
@@ -285,22 +309,34 @@ def fixLastValidState(entity_id: str, lastValidState: str):
             continue
 
         # Modify state to new value
-        if state["state"].get("state", ""):
+        if state["state"].get("state", "") != lastValidState:
+            modificationDone = True
+            print(f"    Updating state/state {state['state']['state']} -> {lastValidState}")
             state["state"]["state"] = lastValidState
 
-        if state["extra_data"]:
+        if (extra_data := state["extra_data"]) and isinstance(extra_data, dict):
 
-            if state["extra_data"].get("last_valid_state", ""):
-                state["extra_data"]["last_valid_state"] = lastValidState
+            if extra_data.get("last_valid_state", "") != lastValidState:
+                modificationDone = True
+                print(f"    Updating extra_data/last_valid_state {extra_data['last_valid_state']} -> {lastValidState}")
+                extra_data["last_valid_state"] = lastValidState
 
-            if state["extra_data"].get("native_value", dict()).get("decimal_str", ""):
-                state["extra_data"]["native_value"]["decimal_str"] = lastValidState
+            if (nativeValue := extra_data.get("native_value", dict())) and isinstance(nativeValue, dict):
+
+                if nativeValue.get("decimal_str", "") != lastValidState:
+                    modificationDone = True
+                    print(f"    Updating extra_data/native_value/decimal_str {nativeValue['decimal_str']} -> {lastValidState}")
+                    nativeValue["decimal_str"] = lastValidState
 
         break
 
-    # Write modified json
-    with open(RESTORE_STATE_PATH, "w") as file:
-        json.dump(restore_state, file, indent=2, ensure_ascii=False)
+    if modificationDone:
+        # Write modified json
+        with open(RESTORE_STATE_PATH, "w") as file:
+            json.dump(restore_state, file, indent=2, ensure_ascii=False)
+
+    else:
+        print("    Nothing was modified!")
 
 
 def SqlExec(SqlQuery: str, arguments: tuple):
