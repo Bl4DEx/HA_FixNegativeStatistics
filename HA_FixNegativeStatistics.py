@@ -12,11 +12,11 @@ import os
 import sys
 import shutil
 import sqlite3
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from datetime import datetime
 
 __author__ = "Sebastian Hollas"
-__version__ = "2.1.2"
+__version__ = "2.2.0"
 
 ####################################################################################
 # USER INPUT REQUIRED !
@@ -36,9 +36,11 @@ DB_SERVER = {
 # Build Filepaths
 ENTITIES_FILE = os.path.join(HA_CONFIG_ROOT, "entities.list")
 RESTORE_STATE_PATH = os.path.join(HA_CONFIG_ROOT, ".storage", "core.restore_state")
+POWERCALC_GROUP_PATH = os.path.join(HA_CONFIG_ROOT, ".storage", "powercalc_group")
 
-if not os.path.isfile(RESTORE_STATE_PATH):
-    sys.exit(f"File {RESTORE_STATE_PATH} does not exist! (Path to HomeAssistant config valid?)")
+# Check for valid HomeAssistant root
+if not os.path.isfile(os.path.join(HA_CONFIG_ROOT, "configuration.yaml")):
+    sys.exit(f"{HA_CONFIG_ROOT} seems not to be the config root of HomeAssistant (configuration.yaml not found!)")
 
 # Open MySQL server connection if user provided DB_SERVER information
 if all(DB_SERVER.values()):
@@ -80,11 +82,21 @@ def main():
             if input().lower() != "yes":
                 sys.exit("Execution stopped by user!")
 
-        # Check that no backup file exists
-        if os.path.isfile(f"{RESTORE_STATE_PATH}.BAK"):
-            sys.exit("core.restore_state backup file already exists!")
-        # Create core.restore_state backup
-        shutil.copyfile(RESTORE_STATE_PATH, f"{RESTORE_STATE_PATH}.BAK")
+        # Check if file exists
+        if os.path.isfile(RESTORE_STATE_PATH):
+            # Check that no backup file exists
+            if os.path.isfile(f"{RESTORE_STATE_PATH}.BAK"):
+                sys.exit("core.restore_state backup file already exists!")
+            # Create core.restore_state backup
+            shutil.copyfile(RESTORE_STATE_PATH, f"{RESTORE_STATE_PATH}.BAK")
+
+        # Check if file exists
+        if os.path.isfile(POWERCALC_GROUP_PATH):
+            # Check that no backup file exists
+            if os.path.isfile(f"{POWERCALC_GROUP_PATH}.BAK"):
+                sys.exit("powercalc_group backup file already exists!")
+            # Create powercalc_group backup
+            shutil.copyfile(POWERCALC_GROUP_PATH, f"{POWERCALC_GROUP_PATH}.BAK")
 
         if not os.path.isfile(ENTITIES_FILE):
             sys.exit(f"File {ENTITIES_FILE} does not exist! (Run with --list first and remove unwanted entities)")
@@ -156,7 +168,8 @@ def fixDatabase(ENTITIES: list):
         recalculateStates(metadata_id=metadata_id_states)
 
         # Fix last valid state to current state
-        fixLastValidState(entity_id=entity_id, lastValidState=lastValidState)
+        fixLastValidState_Riemann(entity_id=entity_id, lastValidState=lastValidState)
+        fixLastValidState_PowerCalc(entity_id=entity_id, lastValidState=lastValidState)
 
     # Store database on disk
     db.commit()
@@ -171,15 +184,18 @@ def recalculateStatistics(metadata_id: int, key: str) -> str:
     SqlExec(f"SELECT id,{key} FROM statistics WHERE metadata_id=? ORDER BY created_ts", (metadata_id,))
     result = cur.fetchall()
 
-    # Get first value from database; this is our starting point
-    try:
-        current_value = Decimal(str(result[0][1]))
-    except ValueError:
-        sys.exit(f"  [ERROR]: Cannot fix this entity because first entry in table 'statistics' for {key} is not a number! Sorry!\n"
-                 f"No changes were committed into the database!")
+    current_value = None
 
     # Loop over all entries starting with the second entry
-    for index, (idx, value) in enumerate(result[1:]):
+    for index, (idx, value) in enumerate(result):
+
+        # Find first valid value
+        if current_value is None:
+            if value and str(value).replace(".", "", 1).isdigit():
+                # Get first valid value from database; this is our starting point
+                current_value = Decimal(str(value))
+
+            continue
 
         # Get previous entry
         _, pre_value = result[index]
@@ -242,16 +258,21 @@ def recalculateStates(metadata_id: int):
                 (metadata_id,))
     result = cur.fetchall()
 
-    # Get first value from database; this is our starting point
-    try:
-        current_state = Decimal(str(result[0][1]))
-        attributes_id = result[0][3]
-    except InvalidOperation:
-        sys.exit(f"  [ERROR]: Cannot fix this entity because first entry in table 'states' is not a number! first entry: {result[0][3]}\n"
-                 f"No changes were committed into the database!")
+    current_state = None
+    attributes_id = None
 
     # Loop over all entries starting with the second entry
-    for index, (state_id, state, old_state_id, attr_id) in enumerate(result[1:]):
+    for index, (state_id, state, old_state_id, attr_id) in enumerate(result):
+
+        # Find first valid value
+        if current_state is None:
+            if state and state.replace(".", "", 1).isdigit():
+                # Get first valid values from database; this is our starting point
+                current_state = Decimal(str(state))
+                attributes_id = attr_id
+
+            continue
+
         pre_state_id, pre_state, _, _ = result[index]
 
         if old_state_id is None:
@@ -293,13 +314,20 @@ def recalculateStates(metadata_id: int):
         print("    Nothing was modified!")
 
 
-def fixLastValidState(entity_id: str, lastValidState: str):
-    print("  Fixing last valid state in core.restore_state")
-    modificationDone = False
+def fixLastValidState_Riemann(entity_id: str, lastValidState: str):
 
-    # Read core.restore_state
+    print("  Fixing last valid state in core.restore_state")
+
+    # Check if file exists
+    if not os.path.isfile(RESTORE_STATE_PATH):
+        print(f"    File {RESTORE_STATE_PATH} not found. Skipping!")
+        return
+
+    # Read core.restore_state file as json object
     with open(RESTORE_STATE_PATH, "r") as file:
         restore_state = json.load(file)
+
+    modificationDone = False
 
     # Loop over json
     for state in restore_state["data"]:
@@ -309,23 +337,23 @@ def fixLastValidState(entity_id: str, lastValidState: str):
             continue
 
         # Modify state to new value
-        if state["state"].get("state", "") != lastValidState:
+        if (state_val := state["state"].get("state", "")) and state_val != lastValidState:
             modificationDone = True
-            print(f"    Updating state/state {state['state']['state']} -> {lastValidState}")
+            print(f"    Updating state/state ({state['state']['state']} -> {lastValidState})")
             state["state"]["state"] = lastValidState
 
         if (extra_data := state["extra_data"]) and isinstance(extra_data, dict):
 
-            if extra_data.get("last_valid_state", "") != lastValidState:
+            if (lastValid_val := extra_data.get("last_valid_state", "")) and lastValid_val != lastValidState:
                 modificationDone = True
-                print(f"    Updating extra_data/last_valid_state {extra_data['last_valid_state']} -> {lastValidState}")
+                print(f"    Updating extra_data/last_valid_state ({extra_data['last_valid_state']} -> {lastValidState})")
                 extra_data["last_valid_state"] = lastValidState
 
             if (nativeValue := extra_data.get("native_value", dict())) and isinstance(nativeValue, dict):
 
-                if nativeValue.get("decimal_str", "") != lastValidState:
+                if (decStr_val := nativeValue.get("decimal_str", "")) and decStr_val != lastValidState:
                     modificationDone = True
-                    print(f"    Updating extra_data/native_value/decimal_str {nativeValue['decimal_str']} -> {lastValidState}")
+                    print(f"    Updating extra_data/native_value/decimal_str ({nativeValue['decimal_str']} -> {lastValidState})")
                     nativeValue["decimal_str"] = lastValidState
 
         break
@@ -334,6 +362,45 @@ def fixLastValidState(entity_id: str, lastValidState: str):
         # Write modified json
         with open(RESTORE_STATE_PATH, "w") as file:
             json.dump(restore_state, file, indent=2, ensure_ascii=False)
+
+    else:
+        print("    Nothing was modified!")
+
+
+def fixLastValidState_PowerCalc(entity_id: str, lastValidState: str):
+    print("  Fixing last valid state in powercalc_group")
+
+    # Check if file exists
+    if not os.path.isfile(POWERCALC_GROUP_PATH):
+        print(f"    File {POWERCALC_GROUP_PATH} not found. Skipping!")
+        return
+
+    # Read powercalc_group file as json object
+    with open(POWERCALC_GROUP_PATH, "r") as file:
+        powercalc = json.load(file)
+
+    modificationDone = False
+
+    # Loop over json
+    for group_name, group in powercalc["data"].items():
+
+        if not isinstance(group, dict):
+            continue
+
+        for sensor, content in group.items():
+            # Search for entity_id
+            if sensor != entity_id:
+                continue
+
+            if (state_val := content.get("state", "")) and state_val != lastValidState:
+                modificationDone = True
+                print(f"    Updating {group_name}/{sensor}/state ({state_val} -> {lastValidState})")
+                content["state"] = lastValidState
+
+    if modificationDone:
+        # Write modified json
+        with open(POWERCALC_GROUP_PATH, "w") as file:
+            json.dump(powercalc, file, indent=2, ensure_ascii=False)
 
     else:
         print("    Nothing was modified!")

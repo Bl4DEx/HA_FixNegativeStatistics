@@ -1,5 +1,11 @@
 # CHANGELOG.md
 
+## 2.2.0
+* Add support for fixing powercalc entities
+* Fixing core.restore_state and powercalc_group is ignored if files do not exist
+* Fixing states and statistiscs: Now searches first valid value and uses it as a starting point  
+  (Previously, skipped if first value was not valid)
+
 ## 2.1.2
 * Table statistics: Update sum/state if value is NULL
 * FixLastValidState: Add checks for types
