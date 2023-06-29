@@ -16,7 +16,7 @@ from decimal import Decimal
 from datetime import datetime
 
 __author__ = "Sebastian Hollas"
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 
 ####################################################################################
 # USER INPUT REQUIRED !
@@ -198,7 +198,7 @@ def recalculateStatistics(metadata_id: int, key: str) -> str:
             continue
 
         # Get previous entry
-        _, pre_value = result[index]
+        _, pre_value = result[index-1]
 
         # Convert do decimal object
         value = Decimal(str(value))
@@ -273,7 +273,7 @@ def recalculateStates(metadata_id: int):
 
             continue
 
-        pre_state_id, pre_state, _, _ = result[index]
+        pre_state_id, pre_state, _, _ = result[index-1]
 
         if old_state_id is None:
             # old_state_id is missing; Update to id of previous entry

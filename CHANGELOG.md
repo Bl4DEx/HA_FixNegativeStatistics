@@ -1,5 +1,8 @@
 # CHANGELOG.md
 
+## 2.2.1
+* Fixed a bug where the previous entry was not properly read
+
 ## 2.2.0
 * Add support for fixing powercalc entities
 * Fixing core.restore_state and powercalc_group is ignored if files do not exist
